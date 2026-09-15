@@ -204,12 +204,20 @@ def extract_codex_line(obj, engineer_id, session_id, fallback_ts, source_ref):
                         payload or {"marker": "session_meta"}, source_ref))
         return docs
     if isinstance(p, dict):
+        mined = {}
+        for _, s in _walk_strings(p):
+            for fk, fv in _mine_text(s).items():
+                mined.setdefault(fk, []).extend(
+                    v for v in fv if v not in mined.get(fk, []))
         # Function/tool call shapes: {name, arguments} anywhere one level down.
         for key in ("function_call", "tool_call", "call", "action"):
             c = p.get(key)
             if isinstance(c, dict) and c.get("name"):
+                payload = {"tool": str(c["name"])[:160]}
+                for fk, fv in mined.items():
+                    payload[fk] = list(fv[:50])
                 docs.append(_mk(engineer_id, session_id, ts, None, "tool_use",
-                                {"tool": str(c["name"])[:160]}, source_ref))
+                                payload, source_ref))
         texts = [s[:400] for _, s in _walk_strings(p)
                  if s.strip()][:4]
         if texts:
@@ -217,11 +225,6 @@ def extract_codex_line(obj, engineer_id, session_id, fallback_ts, source_ref):
                               [("text", t) for t in texts], source_ref)
             if r:
                 docs.append(r)
-        mined = {}
-        for _, s in _walk_strings(p):
-            for fk, fv in _mine_text(s).items():
-                mined.setdefault(fk, []).extend(
-                    v for v in fv if v not in mined.get(fk, []))
         if mined and not any(d["kind"] == "tool_use" for d in docs):
             docs.append(_mk(engineer_id, session_id, ts, None, "resource",
                             mined, source_ref))
