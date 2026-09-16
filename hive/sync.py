@@ -46,11 +46,22 @@ def sync(db_path, sources=None, max_files=0, now=None):
     stats = {"files": 0, "inserted": 0, "skipped_dup": 0, "touched": set(),
              "adapters": {}}
     seen_paths = set()
+    scanned_roots = set()
+    truncated = False  # max_files budget hit: scan is partial, so no tombstones
     for engineer_id, srcs in sources.items():
+        if truncated:
+            break
         for adapter, root in srcs:
+            if truncated:
+                break
+            if not os.path.isdir(root) or not os.access(root, os.R_OK | os.X_OK):
+                continue  # nothing observable; exempt from tombstones below
+            root_complete = True
             n = 0
             for path in _iter_jsonl(adapter, root):
                 if max_files and stats["files"] >= max_files:
+                    truncated = True
+                    root_complete = False
                     break
                 seen_paths.add(path)
                 try:
@@ -84,13 +95,23 @@ def sync(db_path, sources=None, max_files=0, now=None):
                 con.execute("INSERT OR REPLACE INTO file_cursor VALUES(?,?,?)",
                             (path, st.st_mtime, st.st_size))
                 con.commit()
-    # Tombstones for vanished files.
-    for (path,) in con.execute("SELECT path FROM file_cursor").fetchall():
-        if path not in seen_paths and os.path.exists(os.path.dirname(path)):
+            if root_complete:
+                scanned_roots.add(root)
+    # Tombstones for vanished files. Only under roots fully observed this
+    # run: a missing/unreadable root or a budget-truncated scan is absence
+    # of evidence, not evidence of deletion.
+    if not truncated:
+        for (path,) in con.execute("SELECT path FROM file_cursor").fetchall():
+            if path in seen_paths:
+                continue
+            if not any(path == r or path.startswith(r + os.sep)
+                       for r in scanned_roots):
+                continue
             if not os.path.exists(path):
                 store.mark_file_deleted(con, path)
                 con.execute("DELETE FROM file_cursor WHERE path=?", (path,))
                 con.commit()
+    stats["truncated"] = truncated
     # Recompute touched grains, then publish cursors (write order).
     for engineer_id, day, period in sorted(stats["touched"]):
         store.recompute_daily(con, engineer_id, day)
