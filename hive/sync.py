@@ -108,6 +108,15 @@ def sync(db_path, sources=None, max_files=0, now=None):
                        for r in scanned_roots):
                 continue
             if not os.path.exists(path):
+                # Grains covering these events must be recomputed below;
+                # collect before the tombstone hides them (deleted=1).
+                for eng, day, period in con.execute(
+                        "SELECT DISTINCT engineer_id,"
+                        " date(event_at,'unixepoch'),"
+                        " substr(date(event_at,'unixepoch'),1,7)"
+                        " FROM extract_events WHERE source_ref LIKE ?"
+                        " AND deleted=0", (path + "%",)).fetchall():
+                    stats["touched"].add((eng, day, period))
                 store.mark_file_deleted(con, path)
                 con.execute("DELETE FROM file_cursor WHERE path=?", (path,))
                 con.commit()
